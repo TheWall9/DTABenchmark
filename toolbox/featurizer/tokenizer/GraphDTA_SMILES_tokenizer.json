@@ -1,0 +1,93 @@
+{
+  "version": "1.0",
+  "truncation": null,
+  "padding": null,
+  "added_tokens": [
+    {
+      "id": 0,
+      "special": true,
+      "content": "<pad>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false
+    },
+    {
+      "id": 44,
+      "special": true,
+      "content": "<unk>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false
+    }
+  ],
+  "normalizer": null,
+  "pre_tokenizer": {
+    "type": "ByteLevel",
+    "add_prefix_space": false,
+    "trim_offsets": true
+  },
+  "post_processor": null,
+  "decoder": {
+    "type": "ByteLevel",
+    "add_prefix_space": true,
+    "trim_offsets": true
+  },
+  "model": {
+    "type": "BPE",
+    "dropout": null,
+    "unk_token": "<unk>",
+    "continuing_subword_prefix": null,
+    "end_of_word_suffix": null,
+    "fuse_unk": false,
+    "vocab": {
+      "<pad>": 0,
+      "C":1,
+      "N":2,
+      "O":3,
+      "S": 4,
+      "F": 5,
+      "Si": 6,
+      "P": 7,
+      "Cl": 8,
+      "Br": 9,
+      "Mg": 10,
+      "Na": 11,
+      "Ca": 12,
+      "Fe": 13,
+      "As": 14,
+      "Al": 15,
+      "I": 16,
+      "B": 17,
+      "V": 18,
+      "K": 19,
+      "Tl": 20,
+      "Yb": 21,
+      "Sb": 22,
+      "Sn": 23,
+      "Ag": 24,
+      "Pd": 25,
+      "Co": 26,
+      "Se": 27,
+      "Ti": 28,
+      "Zn": 29,
+      "H": 30,
+      "Li": 31,
+      "Ge": 32,
+      "Cu": 33,
+      "Au": 34,
+      "Ni": 35,
+      "Cd": 36,
+      "In": 37,
+      "Mn": 38,
+      "Zr": 39,
+      "Cr": 40,
+      "Pt": 41,
+      "Hg": 42,
+      "Pb": 43,
+      "<unk>": 44
+    },
+    "merges": []
+  }
+}
