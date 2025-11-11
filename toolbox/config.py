@@ -1,8 +1,6 @@
 import os
 
-# os.environ["HTTP_PROXY"] = "http://100.118.242.88:4780"
-# os.environ["HTTPS_PROXY"] = "socks5://100.118.242.88:4780"
-
+ROOT_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
 ROOT_TEMP_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cached")
 EVALUATION_TEMP_DIR = os.path.join(ROOT_TEMP_DIR, "evaluation")
 DATASET_TEMP_DIR = os.path.join(ROOT_TEMP_DIR, "dataset")
@@ -12,8 +10,8 @@ FEATURIZER_OUTPUT_TEMP_DIR = os.path.join(ROOT_TEMP_DIR, "featurizer", "outputs"
 
 
 HHSUITE_DB_PATH = "/mnt/data/datasets/Uniclust/uniclust30_2018_08/uniclust30_2018_08"
-STRUCT_ROOT_DIR = os.path.join(os.path.dirname(ROOT_TEMP_DIR), 'data', 'uniprot_alphafold_struct')
-THIRD_PARTY_CHECKPOINTS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", 'checkpoints')
+STRUCT_ROOT_DIR = os.path.join(ROOT_DATA_DIR, 'uniprot_alphafold_struct')
+THIRD_PARTY_CHECKPOINTS_DIR = os.path.join(ROOT_DATA_DIR, 'checkpoints')
 
 UNIMOL_WEIGHT_DIR = os.path.join(THIRD_PARTY_CHECKPOINTS_DIR, 'unimol_weights')
 if not os.environ.get("UNIMOL_WEIGHT_DIR", False):

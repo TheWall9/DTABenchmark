@@ -4,6 +4,7 @@ from torch import nn, optim
 from torch.nn import functional as F
 from torch_geometric import nn as gnn
 from torch_geometric.utils import softmax as gnn_softmax
+from torch_geometric.utils import to_dense_batch
 from torch_scatter import scatter_add
 from lightning.pytorch.callbacks import EarlyStopping
 
@@ -96,8 +97,15 @@ class FusionProteinFeaturizer(FeaturizerBase):
         cls = self.seq_featurizer.featurize([datapoint])[0]
         graph = struct.graph
         graph.pos = graph.pos[:,1]
-        forward_graph, backward_graph = serailize_graph(graph, batch_key='node_batch', keys=['node_features', 'pos',])
+        seq = graph.seq.copy()
+        forward_graph, backward_graph = serailize_graph(graph, batch_key='node_batch', keys=['node_features', 'pos', 'seq'])
+        forward_graph.seq = seq
         return FeatData(embedding=cls.embedding, graph=forward_graph, prefix='protein')
+
+    def get_feat_info(self, data=None):
+        ans = super().get_feat_info(data=data)
+        ans['num_protein_tokens'] = 21
+        return ans
 
 
 class FusionDataset(datamodule.DTADatasetBase):
@@ -246,34 +254,61 @@ class LigandEncoder(nn.Module):
         d_ff = 4*encoder_embedding_dim
         mamba1 = MambaEncoder(d_model=encoder_embedding_dim, n_layer=n_layer, ssm_cfg={"layer": mamba_version},
                               d_ff=d_ff, bidirectional=bidirectional, dropout=dropout)
-        mamba2 = MambaEncoder(d_model=encoder_embedding_dim, n_layer=n_layer, ssm_cfg={"layer": mamba_version},
-                              d_ff=d_ff, bidirectional=bidirectional, dropout=dropout)
         mamba3 = MambaEncoder(d_model=encoder_embedding_dim, n_layer=n_layer, ssm_cfg={"layer": mamba_version},
                               d_ff=d_ff, bidirectional=bidirectional, dropout=dropout)
-        mamba1.binding_ssm(mamba2)
-        mamba1.binding_ssm(mamba3)
-        self.encoder_0d = nn.Sequential(nn.Linear(config['ligand_embedding_dim'], encoder_embedding_dim*2),
-                                        nn.GLU())
-        self.encoder_1d = MambaTokenEncoder(mamba1, encoder_embedding_dim, num_embeddings=config['num_ligand_tokens'],
-                                            avg_head=avg_head, max_head=max_head, attn_head=attn_head)
-        self.encoder_3d = MambaEncoder3d(mamba3, config['ligand_graph_node_features_dim'], encoder_embedding_dim,
-                                         avg_head=avg_head, max_head=max_head, attn_head=attn_head)
-        dims = [encoder_embedding_dim]
+        if not config['exclusive_ssm']:
+            mamba1.binding_ssm(mamba3)
+        self.encoder_0d, self.encoder_1d, self.encoder_3d = None, None, None
+        if config['use_ligand_0d']:
+            self.encoder_0d = nn.Sequential(nn.Linear(config['ligand_embedding_dim'], encoder_embedding_dim*2),
+                                            nn.GLU())
+        if config['use_ligand_1d']:
+            self.encoder_1d = MambaTokenEncoder(mamba1, encoder_embedding_dim, num_embeddings=config['num_ligand_tokens'],
+                                                avg_head=avg_head, max_head=max_head, attn_head=attn_head)
+        if config['use_ligand_3d']:
+            self.encoder_3d = MambaEncoder3d(mamba3, config['ligand_graph_node_features_dim'], encoder_embedding_dim,
+                                             avg_head=avg_head, max_head=max_head, attn_head=attn_head)
+        dims = [encoder_embedding_dim if config['use_ligand_0d'] else 0]
         if attn_head:
-            dims.append(encoder_embedding_dim*2)
+            if config['use_ligand_1d']:
+                dims.append(encoder_embedding_dim)
+            if config['use_ligand_3d']:
+                dims.append(encoder_embedding_dim)
         if avg_head:
-            dims.append(encoder_embedding_dim*2)
+            if config['use_ligand_1d']:
+                dims.append(encoder_embedding_dim)
+            if config['use_ligand_3d']:
+                dims.append(encoder_embedding_dim)
         if max_head:
-            dims.append(encoder_embedding_dim*2)
+            if config['use_ligand_1d']:
+                dims.append(encoder_embedding_dim)
+            if config['use_ligand_3d']:
+                dims.append(encoder_embedding_dim)
+        assert sum(dims)!=0
         self.output_project = nn.Linear(sum(dims), encoder_output_dim)
+        encoder_n_res_layers = config['encoder_n_res_layers']
+        self.res_layers = nn.ModuleList()
+        for i in range(encoder_n_res_layers):
+            self.res_layers.append(nn.Sequential(nn.Linear(encoder_output_dim, encoder_output_dim),
+                                                 nn.ReLU(inplace=True),
+                                                 nn.Dropout(dropout)))
 
     def forward(self, embedding, input_ids, graph):
-        embedding_0d = self.encoder_0d(embedding)
-        embedding_1d = self.encoder_1d(input_ids=input_ids)
-        embedding_3d = self.encoder_3d(pos=graph.pos, pos_idx=graph.batch, pos_feat=graph.node_features)
-        embedding = torch.cat([embedding_0d, embedding_1d, embedding_3d], dim=-1)
-        output = self.output_project(embedding)
+        embeddings = []
+        if self.encoder_0d is not None:
+            embedding_0d = self.encoder_0d(embedding)
+            embeddings.append(embedding_0d)
+        if self.encoder_1d is not None:
+            embedding_1d = self.encoder_1d(input_ids=input_ids)
+            embeddings.append(embedding_1d)
+        if self.encoder_3d is not None:
+            embedding_3d = self.encoder_3d(pos=graph.pos, pos_idx=graph.batch, pos_feat=graph.node_features)
+            embeddings.append(embedding_3d)
+        embeddings = torch.cat(embeddings, dim=-1)
+        output = self.output_project(embeddings)
         output = F.normalize(output, dim=-1)
+        for layer in self.res_layers:
+            output = layer(output)+output
         return output
 
 
@@ -292,19 +327,37 @@ class ProtEncoder(nn.Module):
         d_ff = 4*encoder_embedding_dim
         mamba1 = MambaEncoder(d_model=encoder_embedding_dim, n_layer=n_layer, ssm_cfg={"layer": mamba_version},
                               d_ff=d_ff, bidirectional=bidirectional, dropout=dropout)
-        # mamba2 = MambaEncoder(d_model=encoder_embedding_dim, n_layer=n_layer, ssm_cfg={"layer": mamba_version},
-        #                       d_ff=d_ff, bidirectional=bidirectional, dropout=dropout)
-        self.encoder_0d = nn.Sequential(nn.Linear(config['protein_embedding_dim'], encoder_embedding_dim*2),
-                                        nn.GLU())
-        self.encoder_3d = MambaEncoder3d(mamba1, config['protein_graph_node_features_dim'], encoder_embedding_dim,
-                                         avg_head=avg_head, max_head=max_head, attn_head=attn_head)
-        dims = [encoder_embedding_dim]
+        mamba3 = MambaEncoder(d_model=encoder_embedding_dim, n_layer=n_layer, ssm_cfg={"layer": mamba_version},
+                              d_ff=d_ff, bidirectional=bidirectional, dropout=dropout)
+        if not config['exclusive_ssm']:
+            mamba1.binding_ssm(mamba3)
+        self.encoder_0d, self.encoder_1d, self.encoder_3d = None, None, None
+        if config['use_protein_0d']:
+            self.encoder_0d = nn.Sequential(nn.Linear(config['protein_embedding_dim'], encoder_embedding_dim*2),
+                                            nn.GLU())
+        if config['use_protein_1d']:
+            self.encoder_1d = MambaTokenEncoder(mamba1, encoder_embedding_dim, num_embeddings=config['num_protein_tokens'],
+                                                avg_head=avg_head, max_head=max_head, attn_head=attn_head)
+        if config['use_protein_3d']:
+            self.encoder_3d = MambaEncoder3d(mamba3, config['protein_graph_node_features_dim'], encoder_embedding_dim,
+                                             avg_head=avg_head, max_head=max_head, attn_head=attn_head)
+        dims = [encoder_embedding_dim if config['use_protein_0d'] else 0]
         if attn_head:
-            dims.append(encoder_embedding_dim)
+            if config['use_protein_1d']:
+                dims.append(encoder_embedding_dim)
+            if config['use_protein_3d']:
+                dims.append(encoder_embedding_dim)
         if avg_head:
-            dims.append(encoder_embedding_dim)
+            if config['use_protein_1d']:
+                dims.append(encoder_embedding_dim)
+            if config['use_protein_3d']:
+                dims.append(encoder_embedding_dim)
         if max_head:
-            dims.append(encoder_embedding_dim)
+            if config['use_protein_1d']:
+                dims.append(encoder_embedding_dim)
+            if config['use_protein_3d']:
+                dims.append(encoder_embedding_dim)
+        assert sum(dims)!=0
         self.output_project = nn.Linear(sum(dims), encoder_output_dim)
         encoder_n_res_layers = config['encoder_n_res_layers']
         self.res_layers = nn.ModuleList()
@@ -315,10 +368,19 @@ class ProtEncoder(nn.Module):
 
 
     def forward(self, embedding, graph):
-        embedding_0d = self.encoder_0d(embedding)
-        embedding_3d = self.encoder_3d(pos=graph.pos, pos_idx=graph.batch, pos_feat=graph.node_features,
-                                       pool_index=graph.batch)
-        embedding = torch.cat([embedding_0d, embedding_3d], dim=-1)
+        embeddings = []
+        if self.encoder_0d is not None:
+            embedding_0d = self.encoder_0d(embedding)
+            embeddings.append(embedding_0d)
+        if self.encoder_1d is not None:
+            input_ids, mask = to_dense_batch(graph.seq, graph.batch)
+            embedding_1d = self.encoder_1d(input_ids=input_ids, attention_mask=mask)
+            embeddings.append(embedding_1d)
+        if self.encoder_3d is not None:
+            embedding_3d = self.encoder_3d(pos=graph.pos, pos_idx=graph.batch, pos_feat=graph.node_features,
+                                           pool_index=graph.batch)
+            embeddings.append(embedding_3d)
+        embedding = torch.cat(embeddings, dim=-1)
         output = self.output_project(embedding)
         output = F.normalize(output, dim=-1)
         for layer in self.res_layers:
@@ -327,7 +389,7 @@ class ProtEncoder(nn.Module):
 
 
 
-class Fusion2Mamba5(ModelBase):
+class Fusion2Mamba6(ModelBase):
     dataset_cls = FusionDataset
     def __init__(self, config):
         super().__init__(config)
@@ -361,8 +423,16 @@ class Fusion2Mamba5(ModelBase):
         parser.add_argument('--decoder_use_norm', action='store_true')
         parser.add_argument("--early_stop_patient", type=int, default=100)
         parser.add_argument("--encoder_n_res_layers", type=int, default=4)
-        parser.set_defaults(batch_size=256, lr=1e-3)
 
+        parser.add_argument('--use_ligand_0d', action='store_true')
+        parser.add_argument('--use_ligand_1d', action='store_true')
+        parser.add_argument('--use_ligand_3d', action='store_true')
+        parser.add_argument('--use_protein_0d', action='store_true')
+        parser.add_argument('--use_protein_1d', action='store_true')
+        parser.add_argument('--use_protein_3d', action='store_true')
+
+        parser.add_argument('--exclusive_ssm', action='store_true')
+        parser.set_defaults(batch_size=256, lr=1e-3, pretrained_model_name_or_path='facebook/esm2_t6_8M_UR50D')
 
     def forward(self, ligand_embedding, ligand_input_ids, ligand_graph, protein_embedding, protein_graph):
         ligand = self.ligand_encoder(ligand_embedding, ligand_input_ids, ligand_graph)
@@ -421,48 +491,98 @@ if __name__ == '__main__':
     dataset_name = 'kiba_pocketdta'
     dataset_name = "kiba"
 
-    # Evaluator(model_name='Fusion2Mamba5', deterministic=True, dataset_name='davis', max_epochs=700, pocket_tops=3,
-    #           max_head=False, attn_head=False, avg_head=True,
-    #           monitor_metric = 'val/CI', monitor_mode='max',
-    #           use_wandb_logger=True, wandb_project='DTA Benchmark', wandb_online=False,
-    #           encoder_n_res_layers=4,
-    #           decoder_dropout=0.1,
-    #           protein_encoder_n_layers=1, ligand_encoder_n_layers=1, bidirectional=False, merge_train_val=False, early_stop_patient=100,
-    #           root_data_dir='../../data', decoder_hidden_dims=(2048, 1024, 512), pretrained_model_name_or_path='facebook/esm2_t6_8M_UR50D',
-    #           encoder_embedding_dim=128, batch_size=256, comment='exp4', lr=1e-3,
-    #           num_workers=12).run(debug=True) #
 
-    Evaluator(model_name='Fusion2Mamba5', deterministic=True, dataset_name='davis', max_epochs=700, pocket_tops=3,
-              max_head=True, attn_head=False, avg_head=False,
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name='davis', max_epochs=500, pocket_tops=2,
+              max_head=False, attn_head=False, avg_head=True,
               monitor_metric = 'val/CI', monitor_mode='max',
-              use_wandb_logger=True, wandb_project='DTA Benchmark', wandb_online=False,
-              encoder_n_res_layers=4,
-              decoder_dropout=0.1,
-              protein_encoder_n_layers=1, ligand_encoder_n_layers=1, bidirectional=False, merge_train_val=False, early_stop_patient=100,
-              root_data_dir='../../data', decoder_hidden_dims=(2048, 1024, 512), pretrained_model_name_or_path='facebook/esm2_t6_8M_UR50D',
-              encoder_embedding_dim=128, batch_size=256, comment='exp4', lr=1e-3,
-              num_workers=12).run(debug=True) #
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v2',
+              encoder_n_res_layers=4, merge_train_val=True,
+              use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
+              use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
+              num_workers=10).run(debug=True) #
 
-    Evaluator(model_name='Fusion2Mamba5', deterministic=True, dataset_name='davis', max_epochs=700, pocket_tops=3,
-              max_head=False, attn_head=True, avg_head=False,
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name='davis', max_epochs=500, pocket_tops=1,
+              max_head=False, attn_head=False, avg_head=True,
               monitor_metric = 'val/CI', monitor_mode='max',
-              use_wandb_logger=True, wandb_project='DTA Benchmark', wandb_online=False,
-              encoder_n_res_layers=4,
-              decoder_dropout=0.1,
-              protein_encoder_n_layers=1, ligand_encoder_n_layers=1, bidirectional=False, merge_train_val=False, early_stop_patient=100,
-              root_data_dir='../../data', decoder_hidden_dims=(2048, 1024, 512), pretrained_model_name_or_path='facebook/esm2_t6_8M_UR50D',
-              encoder_embedding_dim=128, batch_size=256, comment='exp4', lr=1e-3,
-              num_workers=12).run(debug=True) #
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v2',
+              encoder_n_res_layers=4, merge_train_val=True,
+              use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
+              use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
+              num_workers=10).run(debug=True) #
 
-    # Evaluator(model_name='Fusion2Mamba5', deterministic=True, dataset_name='davis', max_epochs=700, pocket_tops=3,
-    #           # max_head=False, attn_head=False, avg_head=True,
-    #           monitor_metric = 'val/CI', monitor_mode='max',
-    #           use_wandb_logger=True, wandb_project='DTA Benchmark', wandb_online=False,
-    #           encoder_n_res_layers=4,
-    #           decoder_dropout=0.1,
-    #           protein_encoder_n_layers=1, ligand_encoder_n_layers=1, bidirectional=False, merge_train_val=False, early_stop_patient=100,
-    #           root_data_dir='../../data', decoder_hidden_dims=(2048, 1024, 512), pretrained_model_name_or_path='facebook/esm2_t6_8M_UR50D',
-    #           encoder_embedding_dim=128, batch_size=256, comment='exp3', lr=1e-3,
-    #           num_workers=16).run(debug=True) #
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name='davis', max_epochs=500, pocket_tops=4,
+              max_head=False, attn_head=False, avg_head=True,
+              monitor_metric = 'val/CI', monitor_mode='max',
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v2',
+              encoder_n_res_layers=4, merge_train_val=True,
+              use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
+              use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
+              num_workers=10).run(debug=True) #
     exit()
 
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name='davis', max_epochs=500, pocket_tops=3,
+              max_head=False, attn_head=False, avg_head=True,
+              monitor_metric = 'val/CI', monitor_mode='max',
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v2',
+              encoder_n_res_layers=4, merge_train_val=True,
+              use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
+              use_protein_0d=True, use_protein_1d=True, use_protein_3d=True,
+              num_workers=10).run(debug=True) #
+
+    exit()
+
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name='davis', max_epochs=500, pocket_tops=3,
+              max_head=False, attn_head=False, avg_head=True,
+              monitor_metric = 'val/CI', monitor_mode='max',
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v2',
+              encoder_n_res_layers=4, merge_train_val=True,
+              use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
+              use_protein_0d=True, use_protein_1d=False, use_protein_3d=False,
+              num_workers=10).run(debug=True) #
+
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name='davis', max_epochs=500, pocket_tops=3,
+              max_head=False, attn_head=False, avg_head=True,
+              monitor_metric = 'val/CI', monitor_mode='max',
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v2',
+              encoder_n_res_layers=4, merge_train_val=True,
+              use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
+              use_protein_0d=False, use_protein_1d=True, use_protein_3d=False,
+              num_workers=10).run(debug=True) #
+
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name='davis', max_epochs=500, pocket_tops=3,
+              max_head=False, attn_head=False, avg_head=True,
+              monitor_metric = 'val/CI', monitor_mode='max',
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v2',
+              encoder_n_res_layers=4, merge_train_val=True,
+              use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
+              use_protein_0d=False, use_protein_1d=False, use_protein_3d=True,
+              num_workers=10).run(debug=True) #
+
+    exit()
+
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name='davis', max_epochs=500, pocket_tops=3,
+              max_head=False, attn_head=False, avg_head=True,
+              monitor_metric = 'val/CI', monitor_mode='max',
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v1',
+              encoder_n_res_layers=4, merge_train_val=True,
+              use_ligand_0d=True, use_ligand_1d=False, use_ligand_3d=False,
+              use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
+              num_workers=10).run(debug=True) #
+
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name='davis', max_epochs=500, pocket_tops=3,
+              max_head=False, attn_head=False, avg_head=True,
+              monitor_metric = 'val/CI', monitor_mode='max',
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v1',
+              encoder_n_res_layers=4, merge_train_val=True,
+              use_ligand_0d=False, use_ligand_1d=True, use_ligand_3d=False,
+              use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
+              num_workers=10).run(debug=True) #
+
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name='davis', max_epochs=500, pocket_tops=3,
+              max_head=False, attn_head=False, avg_head=True,
+              monitor_metric = 'val/CI', monitor_mode='max',
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v1',
+              encoder_n_res_layers=4, merge_train_val=True,
+              use_ligand_0d=False, use_ligand_1d=False, use_ligand_3d=True,
+              use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
+              num_workers=10).run(debug=True) #

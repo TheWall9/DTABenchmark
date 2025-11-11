@@ -203,7 +203,8 @@ class LLMStructFeaturizer(FeaturizerBase):
         edge_index = data['edge_index'].astype(float)
         pos = data['pos'].astype(float)
         node_batch = np.zeros(len(pos), dtype=int)
-        graph = GraphData(node_features=inputs_embeds, edge_index=edge_index, pos=pos, node_batch=node_batch)
+        seq = self.struct_loader.encode_residues(data['seq'])
+        graph = GraphData(node_features=inputs_embeds, edge_index=edge_index, pos=pos, node_batch=node_batch, seq=seq)
         return FeatData(graph=graph, prefix='protein')
 
 
@@ -474,6 +475,14 @@ class StructureLoader():
             self.seq_struct_map_file = os.path.join(struct_root_dir, 'seq_struct_esmfold_map.json')
         self.cache_dir = os.path.join(FEATURIZER_INPUT_TEMP_DIR, 'StructureLoader', struct_type)
         self.top = top
+        self.letter_to_num = {'C': 4, 'D': 3, 'S': 15, 'Q': 5, 'K': 11, 'I': 9,
+                       'P': 14, 'T': 16, 'F': 13, 'X': 0, 'G': 7, 'H': 8,
+                       'E': 6, 'L': 10, 'R': 1, 'W': 17, 'V': 19, 'A': 20,
+                       'N': 2, 'Y': 18, 'M': 12}
+        self.num_to_letter = {v:k for k, v in self.letter_to_num.items()}
+
+    def encode_residues(self, seq):
+        return np.array([self.letter_to_num[c] for c in seq], dtype=int)
 
     @classmethod
     def protonate(cls, pdb_file, cache_dir):

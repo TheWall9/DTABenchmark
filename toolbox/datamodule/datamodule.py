@@ -10,7 +10,7 @@ from sklearn.model_selection import KFold
 import datasets
 
 from toolbox.utils import load_class
-from toolbox.config import DATASET_TEMP_DIR
+from toolbox.config import DATASET_TEMP_DIR, ROOT_DATA_DIR
 
 from toolbox.datamodule.dataset import DTADatasetBase
 
@@ -155,7 +155,7 @@ class DataModule(LightningDataModule, CrossValidationMixin):
 
     @classmethod
     def add_parser_arguments(cls, parser):
-        parser.add_argument('--root_data_dir', type=str, default='../../data')
+        parser.add_argument('--root_data_dir', type=str, default=ROOT_DATA_DIR)
         parser.add_argument('--dataset_name', type=str, default='kiba')
         parser.add_argument('--cached_data_dir', type=str, default=DATASET_TEMP_DIR)
         parser.add_argument('--cv_split_type', type=str, default='predetermined', choices=['predetermined', 'cv_no_test', 'cv'])
