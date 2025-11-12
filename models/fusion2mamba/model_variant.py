@@ -55,18 +55,22 @@ def serailize_graph(graph, batch_key, keys):
 
 
 class FusionLigandFeaturizer(FeaturizerBase):
-    def __init__(self, smiles_max_lengths=100):
+    def __init__(self, smiles_max_lengths=100, serailize_ligand_graph=True):
         super().__init__()
         self.smiles_max_lengths = smiles_max_lengths
         self.morgan_featurizer = MorganFeaturizer()
         self.smiles_featurizer = SimpleSmilesTokenFeaturizer(smiles_max_lengths=smiles_max_lengths)
         self.struct_featurizer = GraphMVP3dPointFeaturizer()
+        self.serailize_ligand_graph = serailize_ligand_graph
 
     def _featurize(self, datapoint, **kwargs):
         morgan = self.morgan_featurizer.featurize([datapoint])[0]
         tokens = self.smiles_featurizer.featurize([datapoint])[0]
         struct = self.struct_featurizer.featurize([datapoint])[0]
-        forward_graph, backward_graph = serailize_graph(struct.graph, batch_key=None, keys=['raw_features', 'pos'])
+        if self.serailize_ligand_graph:
+            forward_graph, backward_graph = serailize_graph(struct.graph, batch_key=None, keys=['raw_features', 'pos'])
+        else:
+            forward_graph = struct.graph
         forward_graph.node_features = forward_graph.raw_features
         ans = FeatData(embedding=morgan.embedding, input_ids=tokens.input_ids,
                        graph=forward_graph, prefix='ligand')
@@ -79,7 +83,7 @@ class FusionLigandFeaturizer(FeaturizerBase):
 
 class FusionProteinFeaturizer(FeaturizerBase):
     def __init__(self, struct_root_dir=STRUCT_ROOT_DIR, struct_type='esmfold', pocket_type='dogsite3', pocket_top=3, n_res_expand=10,
-                 edge_num=10, rbf_num=16, pretrained_model_name_or_path="facebook/esm2_t6_8M_UR50D", feat_type='cls'):
+                 edge_num=10, rbf_num=16, pretrained_model_name_or_path="facebook/esm2_t6_8M_UR50D", feat_type='cls', serailize_protein_graph=True,):
         super().__init__()
         self.struct_root_dir = struct_root_dir
         self.struct_type = struct_type
@@ -87,6 +91,9 @@ class FusionProteinFeaturizer(FeaturizerBase):
         self.pocket_top = pocket_top
         self.pretrained_model_name_or_path = pretrained_model_name_or_path
         self.feat_type = feat_type
+        self.edge_num = edge_num
+        self.rbf_num = rbf_num
+        self.serailize_protein_graph = serailize_protein_graph
         self.struct_featurizer = LLMStructFeaturizer(struct_root_dir=struct_root_dir, pocket_top=pocket_top,
                                                      struct_type=struct_type, pocket_type=pocket_type, n_res_expand=n_res_expand,
                                                      pretrained_model_name_or_path=pretrained_model_name_or_path)
@@ -97,9 +104,12 @@ class FusionProteinFeaturizer(FeaturizerBase):
         cls = self.seq_featurizer.featurize([datapoint])[0]
         graph = struct.graph
         graph.pos = graph.pos[:,1]
-        seq = graph.seq.copy()
-        forward_graph, backward_graph = serailize_graph(graph, batch_key='node_batch', keys=['node_features', 'pos', 'seq'])
-        forward_graph.seq = seq
+        if self.serailize_protein_graph:
+            seq = graph.seq.copy()
+            forward_graph, backward_graph = serailize_graph(graph, batch_key='node_batch', keys=['node_features', 'pos', 'seq'])
+            forward_graph.seq = seq
+        else:
+            forward_graph = graph
         return FeatData(embedding=cls.embedding, graph=forward_graph, prefix='protein')
 
     def get_feat_info(self, data=None):
@@ -397,11 +407,13 @@ class Fusion2Mamba6(ModelBase):
         decoder_hidden_dims = config['decoder_hidden_dims']
         decoder_dropout = config['decoder_dropout']
         decoder_use_norm = config['decoder_use_norm']
+        use_z_score = config['use_z_score']
         self.ligand_encoder = LigandEncoder(config)
         self.protein_encoder = ProtEncoder(config)
         # self.ligand_encoder.encoder_1d.model.binding_ssm(self.protein_encoder.encoder_3d.model)
         self.decoder = CombinedDecoder(encoder_output_dim, encoder_output_dim, hidden_dims=decoder_hidden_dims,
                                        dropout=decoder_dropout, norm=decoder_use_norm)
+        self.use_z_score = config['use_z_score']
         self.register_buffer('mean', torch.tensor(config['affinity_mean']))
         self.register_buffer('std', torch.tensor(config['affinity_std']))
 
@@ -430,7 +442,7 @@ class Fusion2Mamba6(ModelBase):
         parser.add_argument('--use_protein_0d', action='store_true')
         parser.add_argument('--use_protein_1d', action='store_true')
         parser.add_argument('--use_protein_3d', action='store_true')
-
+        parser.add_argument('--use_z_score', action='store_true')
         parser.add_argument('--exclusive_ssm', action='store_true')
         parser.set_defaults(batch_size=256, lr=1e-3, pretrained_model_name_or_path='facebook/esm2_t6_8M_UR50D')
 
@@ -438,6 +450,8 @@ class Fusion2Mamba6(ModelBase):
         ligand = self.ligand_encoder(ligand_embedding, ligand_input_ids, ligand_graph)
         protein = self.protein_encoder(protein_embedding, protein_graph)
         predict = self.decoder(ligand, protein)
+        if self.use_z_score:
+            predict = predict*self.std+self.mean
         return predict
 
     def step(self, ligand_embedding, ligand_input_ids, ligand_graph,
@@ -445,9 +459,6 @@ class Fusion2Mamba6(ModelBase):
         predict = self.forward(ligand_embedding, ligand_input_ids, ligand_graph,
                                protein_embedding, protein_graph)
         loss = F.mse_loss(predict, affinity)
-        # loss = F.mse_loss(predict, (affinity-self.mean)/self.std)
-        # predict = predict*self.std+self.mean
-
         if torch.isnan(loss):
             print("WARNING: loss is NaN")
             self.trainer.should_stop = True
@@ -488,39 +499,172 @@ class Fusion2Mamba6(ModelBase):
 
 if __name__ == '__main__':
     from toolbox import Evaluator
-    dataset_name = 'kiba_pocketdta'
-    dataset_name = "kiba"
+    dataset_name = 'davis'
 
-
-    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name='davis', max_epochs=500, pocket_tops=2,
+    # Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=500, pocket_tops=3,
+    #           max_head=False, attn_head=False, avg_head=True,
+    #           monitor_metric='val/CI', monitor_mode='max',
+    #           use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v4',
+    #           encoder_n_res_layers=4, merge_train_val=True, exclusive_ssm=True,
+    #           use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
+    #           use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
+    #           num_workers=10).run(debug=True)
+    #
+    #
+    # exit()
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name='kiba', max_epochs=700, pocket_tops=3,
               max_head=False, attn_head=False, avg_head=True,
               monitor_metric = 'val/CI', monitor_mode='max',
-              use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v2',
+              use_wandb_logger=True, wandb_project='DTA Benchmark model', wandb_online=True, comment='exp_v0',
               encoder_n_res_layers=4, merge_train_val=True,
+              use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
+              use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
+              num_workers=10).run()
+
+    exit()
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=500, pocket_tops=3,
+              max_head=False, attn_head=False, avg_head=True,
+              monitor_metric = 'val/CI', monitor_mode='max',
+              use_wandb_logger=True, wandb_project='DTA Benchmark model', wandb_online=True, comment='exp_v0',
+              encoder_n_res_layers=4, merge_train_val=True,
+              use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
+              use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
+              num_workers=10).run()
+    exit()
+    ################################# serailize graph #############################################
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=500, pocket_tops=3,
+              max_head=False, attn_head=False, avg_head=True,
+              monitor_metric = 'val/CI', monitor_mode='max',
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v4',
+              encoder_n_res_layers=4, merge_train_val=True, serailize_ligand_graph=False, serailize_protein_graph=False,
+              use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
+              use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
+              num_workers=10).run(debug=True)
+
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=500, pocket_tops=3,
+              max_head=False, attn_head=False, avg_head=True,
+              monitor_metric = 'val/CI', monitor_mode='max',
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v4',
+              encoder_n_res_layers=4, merge_train_val=True, use_z_score=True,
+              use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
+              use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
+              num_workers=10).run(debug=True)
+
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=500, pocket_tops=3,
+              max_head=False, attn_head=False, avg_head=True,
+              monitor_metric = 'val/CI', monitor_mode='max',
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v4',
+              encoder_n_res_layers=4, merge_train_val=True, exclusive_ssm=True,
+              use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
+              use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
+              num_workers=10).run(debug=True)
+
+
+    ################################# pocket res expand #############################################
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=500, pocket_tops=3,
+              max_head=False, attn_head=False, avg_head=True,
+              monitor_metric = 'val/CI', monitor_mode='max',
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v4',
+              encoder_n_res_layers=4, merge_train_val=True, n_res_expand=0,
               use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
               use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
               num_workers=10).run(debug=True) #
 
-    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name='davis', max_epochs=500, pocket_tops=1,
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=500, pocket_tops=3,
               max_head=False, attn_head=False, avg_head=True,
               monitor_metric = 'val/CI', monitor_mode='max',
-              use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v2',
-              encoder_n_res_layers=4, merge_train_val=True,
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v4',
+              encoder_n_res_layers=4, merge_train_val=True, n_res_expand=5,
               use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
               use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
               num_workers=10).run(debug=True) #
 
-    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name='davis', max_epochs=500, pocket_tops=4,
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=500, pocket_tops=3,
               max_head=False, attn_head=False, avg_head=True,
               monitor_metric = 'val/CI', monitor_mode='max',
-              use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v2',
-              encoder_n_res_layers=4, merge_train_val=True,
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v4',
+              encoder_n_res_layers=4, merge_train_val=True, n_res_expand=15,
+              use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
+              use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
+              num_workers=10).run(debug=True) #
+
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=500, pocket_tops=3,
+              max_head=False, attn_head=False, avg_head=True,
+              monitor_metric = 'val/CI', monitor_mode='max',
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v4',
+              encoder_n_res_layers=4, merge_train_val=True, n_res_expand=20,
               use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
               use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
               num_workers=10).run(debug=True) #
     exit()
+    ################################# pretrained_model_name_or_path #############################################
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=500, pocket_tops=3,
+              max_head=False, attn_head=False, avg_head=True,
+              monitor_metric = 'val/CI', monitor_mode='max',
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v3',
+              encoder_n_res_layers=4, merge_train_val=True, pretrained_model_name_or_path='facebook/esm2_t12_35M_UR50D',
+              use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
+              use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
+              num_workers=10).run(debug=True) #
 
-    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name='davis', max_epochs=500, pocket_tops=3,
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=500, pocket_tops=3,
+              max_head=False, attn_head=False, avg_head=True,
+              monitor_metric = 'val/CI', monitor_mode='max',
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v3',
+              encoder_n_res_layers=4, merge_train_val=True, pretrained_model_name_or_path='facebook/esm2_t30_150M_UR50D',
+              use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
+              use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
+              num_workers=10).run(debug=True) #
+
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=500, pocket_tops=3,
+              max_head=False, attn_head=False, avg_head=True,
+              monitor_metric = 'val/CI', monitor_mode='max',
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v3',
+              encoder_n_res_layers=4, merge_train_val=True, pretrained_model_name_or_path='Rostlab/prot_bert',
+              use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
+              use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
+              num_workers=10).run(debug=True) #
+    exit()
+    ################################# pocket_tops #############################################
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=500, pocket_tops=2,
+              max_head=False, attn_head=False, avg_head=True,
+              monitor_metric = 'val/CI', monitor_mode='max',
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v2',
+              encoder_n_res_layers=4, merge_train_val=True,
+              use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
+              use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
+              num_workers=10).run(debug=True) #
+
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=500, pocket_tops=1,
+              max_head=False, attn_head=False, avg_head=True,
+              monitor_metric = 'val/CI', monitor_mode='max',
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v2',
+              encoder_n_res_layers=4, merge_train_val=True,
+              use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
+              use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
+              num_workers=10).run(debug=True) #
+
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=500, pocket_tops=4,
+              max_head=False, attn_head=False, avg_head=True,
+              monitor_metric = 'val/CI', monitor_mode='max',
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v2',
+              encoder_n_res_layers=4, merge_train_val=True,
+              use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
+              use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
+              num_workers=10).run(debug=True) #
+
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=500, pocket_tops=5,
+              max_head=False, attn_head=False, avg_head=True,
+              monitor_metric = 'val/CI', monitor_mode='max',
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v2',
+              encoder_n_res_layers=4, merge_train_val=True,
+              use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
+              use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
+              num_workers=10).run(debug=True) #
+
+    exit()
+    ################################# protein 0/1/3d #############################################
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=500, pocket_tops=3,
               max_head=False, attn_head=False, avg_head=True,
               monitor_metric = 'val/CI', monitor_mode='max',
               use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v2',
@@ -531,7 +675,7 @@ if __name__ == '__main__':
 
     exit()
 
-    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name='davis', max_epochs=500, pocket_tops=3,
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=500, pocket_tops=3,
               max_head=False, attn_head=False, avg_head=True,
               monitor_metric = 'val/CI', monitor_mode='max',
               use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v2',
@@ -540,7 +684,7 @@ if __name__ == '__main__':
               use_protein_0d=True, use_protein_1d=False, use_protein_3d=False,
               num_workers=10).run(debug=True) #
 
-    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name='davis', max_epochs=500, pocket_tops=3,
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=500, pocket_tops=3,
               max_head=False, attn_head=False, avg_head=True,
               monitor_metric = 'val/CI', monitor_mode='max',
               use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v2',
@@ -549,7 +693,7 @@ if __name__ == '__main__':
               use_protein_0d=False, use_protein_1d=True, use_protein_3d=False,
               num_workers=10).run(debug=True) #
 
-    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name='davis', max_epochs=500, pocket_tops=3,
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=500, pocket_tops=3,
               max_head=False, attn_head=False, avg_head=True,
               monitor_metric = 'val/CI', monitor_mode='max',
               use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v2',
@@ -559,8 +703,8 @@ if __name__ == '__main__':
               num_workers=10).run(debug=True) #
 
     exit()
-
-    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name='davis', max_epochs=500, pocket_tops=3,
+    ################################# ligand 0/1/3d #############################################
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=500, pocket_tops=3,
               max_head=False, attn_head=False, avg_head=True,
               monitor_metric = 'val/CI', monitor_mode='max',
               use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v1',
@@ -569,7 +713,7 @@ if __name__ == '__main__':
               use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
               num_workers=10).run(debug=True) #
 
-    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name='davis', max_epochs=500, pocket_tops=3,
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=500, pocket_tops=3,
               max_head=False, attn_head=False, avg_head=True,
               monitor_metric = 'val/CI', monitor_mode='max',
               use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v1',
@@ -578,7 +722,7 @@ if __name__ == '__main__':
               use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
               num_workers=10).run(debug=True) #
 
-    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name='davis', max_epochs=500, pocket_tops=3,
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=500, pocket_tops=3,
               max_head=False, attn_head=False, avg_head=True,
               monitor_metric = 'val/CI', monitor_mode='max',
               use_wandb_logger=True, wandb_project='DTA Benchmark variant', wandb_online=True, comment='exp_v1',

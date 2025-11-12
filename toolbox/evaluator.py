@@ -84,6 +84,7 @@ class Evaluator():
     def run(self, debug=False, overwrite=False, callbacks=None):
         args = self.parser_args(self.model_name, **self.kwargs)
         job_dir = os.path.join(args.pop('job_dir'), args['dataset_name'])
+        cv_fold_id = args.pop('cv_fold_id', None)
         if not os.path.exists(job_dir):
             os.makedirs(job_dir)
         jobs = {item.split("_")[-1].split(".json")[0]: item for item in os.listdir(job_dir) if item.endswith('.json')}
@@ -99,6 +100,9 @@ class Evaluator():
             is_valid = task_hash in job_record and job_record[task_hash] is not None
             if is_valid and os.path.exists(job_record[task_hash]) and not overwrite:
                 print(f"skip task {task_hash} \n{job_record[task_hash]}")
+                continue
+            if cv_fold_id is not None and str(config['cv_fold_id'])!=str(cv_fold_id):
+                print(f"skip cv_fold_id:{config['cv_fold_id']}")
                 continue
             print("exec task", task_hash, config)
             res_path = self.exec(config, dataset, model_cls, callbacks=callbacks)
