@@ -20,7 +20,7 @@ from Bio import UniProt
 from Bio import SeqIO, Entrez
 from Bio.PDB.MMCIFParser import MMCIFParser
 
-Entrez.email = "bigsnow233@gmail.com"
+Entrez.email = "xxx@gmail.com"
 
 def load_class(module_path: str, class_name: str):
     try:
