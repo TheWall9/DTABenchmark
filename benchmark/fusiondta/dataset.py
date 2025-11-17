@@ -1,9 +1,6 @@
-
 from toolbox import datamodule
 from toolbox.featurizer.ligand import SimpleSmilesTokenFeaturizer
 from toolbox.featurizer.protein import LLMFeaturizer
-
-
 
 
 

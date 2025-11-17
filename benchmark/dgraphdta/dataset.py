@@ -1,12 +1,8 @@
-
 import numpy as np
-
-
 from torch_geometric.loader import DataLoader
 
 from deepchem import feat
 from deepchem.feat.graph_features import one_of_k_encoding
-
 
 from toolbox import datamodule, FeaturizerBase, FeatData, GraphData
 from toolbox.config import HHSUITE_DB_PATH, STRUCT_ROOT_DIR

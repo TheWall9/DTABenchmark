@@ -105,10 +105,6 @@ class FusionDTA(ModelBase):
         encoder_output_dim = hidden_dim*2 if bidirectional else hidden_dim
         self.attn = LinkAttention(encoder_output_dim, n_heads)
         self.decoder = CombinedDecoder(encoder_output_dim, encoder_output_dim, hidden_dims=decoder_hidden_dims, dropout=dropout, input_dim3=encoder_output_dim)
-        self.register_buffer('mean', torch.tensor(config['affinity_mean']))
-        self.register_buffer('std', torch.tensor(config['affinity_std']))
-        total_params = sum(p.numel() for p in self.parameters())
-        print(f"总参数个数：{total_params}")
 
     def forward(self, ligand_graph, protein_graph):
         ligand, ligand_hiddens = self.ligand_encoder(ligand_graph.input_ids, ligand_graph.input_ids_batch)
@@ -121,10 +117,8 @@ class FusionDTA(ModelBase):
 
     def step(self, ligand_graph, protein_graph, affinity):
         predict = self.forward(ligand_graph, protein_graph)
-        # loss = F.mse_loss(predict, affinity)
-        # return {"loss": loss, "predict": predict}
-        loss = F.mse_loss(predict, (affinity-self.mean)/self.std)
-        return {"loss": loss, "predict": predict*self.std + self.mean}
+        loss = F.mse_loss(predict, affinity)
+        return {"loss": loss, "predict": predict}
 
     @classmethod
     def add_parser_arguments(cls, parser):
@@ -157,21 +151,5 @@ class FusionDTAPad(FusionDTA):
                                            embedding_dim=embedding_dim, hidden_dim=hidden_dim,
                                            bidirectional=bidirectional, n_heads=n_heads,
                                            n_layers=num_layers, dropout=dropout)
-        # self.register_buffer('mean', torch.tensor(5.4515))
-        # self.register_buffer('std', torch.tensor(0.8947))
 
-
-    def step(self, ligand_graph, protein_graph, affinity):
-        predict = self.forward(ligand_graph, protein_graph)
-        loss = F.mse_loss(predict, (affinity-self.mean)/self.std)
-        return {"loss": loss, "predict": predict*self.std + self.mean}
-
-if __name__=='__main__':
-    from toolbox import Evaluator
-    # Evaluator(model_name='FusionDTA', max_epochs=1000, dataset_name='davis',).run(debug=True)  # 0.8203641176223755 0.24 100epoch
-    # Evaluator(model_name='FusionDTA', max_epochs=200, batch_size=128, merge_train_val=False, dataset_name='davis',).run(debug=True)  #
-    # Evaluator(model_name='FusionDTAPad', max_epochs=150, batch_size=128, merge_train_val=True, dataset_name='davis',).run(debug=True)  #
-    # Evaluator(model_name='FusionDTAPad', max_epochs=150, batch_size=128, merge_train_val=False, dataset_name='davis',).run(debug=True)  #
-    # Evaluator(model_name='FusionDTAPad', max_epochs=150, batch_size=128, merge_train_val=True, dataset_name='davis',).run(debug=True)  #
-    Evaluator(model_name='FusionDTA', max_epochs=150, batch_size=8, merge_train_val=True, dataset_name='davis',).run(debug=True)  #
 
