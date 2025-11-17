@@ -375,9 +375,6 @@ class Fusion2Mamba5(ModelBase):
         predict = self.forward(ligand_embedding, ligand_input_ids, ligand_graph,
                                protein_embedding, protein_graph)
         loss = F.mse_loss(predict, affinity)
-        # loss = F.mse_loss(predict, (affinity-self.mean)/self.std)
-        # predict = predict*self.std+self.mean
-
         if torch.isnan(loss):
             print("WARNING: loss is NaN")
             self.trainer.should_stop = True
@@ -420,49 +417,38 @@ if __name__ == '__main__':
     from toolbox import Evaluator
     dataset_name = 'kiba_pocketdta'
     dataset_name = "kiba"
+    max_epochs = 700
+    ################################# 5 fold #############################################
 
-    # Evaluator(model_name='Fusion2Mamba5', deterministic=True, dataset_name='davis', max_epochs=700, pocket_tops=3,
-    #           max_head=False, attn_head=False, avg_head=True,
-    #           monitor_metric = 'val/CI', monitor_mode='max',
-    #           use_wandb_logger=True, wandb_project='DTA Benchmark', wandb_online=False,
-    #           encoder_n_res_layers=4,
-    #           decoder_dropout=0.1,
-    #           protein_encoder_n_layers=1, ligand_encoder_n_layers=1, bidirectional=False, merge_train_val=False, early_stop_patient=100,
-    #           root_data_dir='../../data', decoder_hidden_dims=(2048, 1024, 512), pretrained_model_name_or_path='facebook/esm2_t6_8M_UR50D',
-    #           encoder_embedding_dim=128, batch_size=256, comment='exp4', lr=1e-3,
-    #           num_workers=12).run(debug=True) #
 
-    Evaluator(model_name='Fusion2Mamba5', deterministic=True, dataset_name='davis', max_epochs=700, pocket_tops=3,
-              max_head=True, attn_head=False, avg_head=False,
+    Evaluator(model_name='Fusion2Mamba5', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs, pocket_tops=3,
+              max_head=False, attn_head=False, avg_head=True,
               monitor_metric = 'val/CI', monitor_mode='max',
-              use_wandb_logger=True, wandb_project='DTA Benchmark', wandb_online=False,
-              encoder_n_res_layers=4,
-              decoder_dropout=0.1,
-              protein_encoder_n_layers=1, ligand_encoder_n_layers=1, bidirectional=False, merge_train_val=False, early_stop_patient=100,
-              root_data_dir='../../data', decoder_hidden_dims=(2048, 1024, 512), pretrained_model_name_or_path='facebook/esm2_t6_8M_UR50D',
-              encoder_embedding_dim=128, batch_size=256, comment='exp4', lr=1e-3,
-              num_workers=12).run(debug=True) #
+              use_wandb_logger=True, wandb_project='DTA Benchmark model', wandb_online=False, comment='exp_v6/cold',
+              encoder_n_res_layers=4, merge_train_val=True, n_res_expand=0,
+              use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
+              use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
+              num_workers=10).run() #
 
-    Evaluator(model_name='Fusion2Mamba5', deterministic=True, dataset_name='davis', max_epochs=700, pocket_tops=3,
-              max_head=False, attn_head=True, avg_head=False,
-              monitor_metric = 'val/CI', monitor_mode='max',
-              use_wandb_logger=True, wandb_project='DTA Benchmark', wandb_online=False,
-              encoder_n_res_layers=4,
-              decoder_dropout=0.1,
-              protein_encoder_n_layers=1, ligand_encoder_n_layers=1, bidirectional=False, merge_train_val=False, early_stop_patient=100,
-              root_data_dir='../../data', decoder_hidden_dims=(2048, 1024, 512), pretrained_model_name_or_path='facebook/esm2_t6_8M_UR50D',
-              encoder_embedding_dim=128, batch_size=256, comment='exp4', lr=1e-3,
-              num_workers=12).run(debug=True) #
+    ################################# cold  #############################################
+    Evaluator(model_name='Fusion2Mamba5', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs, pocket_tops=3,
+              max_head=False, attn_head=False, avg_head=True,
+              monitor_metric = 'val/CI', monitor_mode='max', cv_split_type='cold_drug', cv_n_splits=4,
+              use_wandb_logger=True, wandb_project='DTA Benchmark model', wandb_online=False, comment='exp_v6/cold',
+              encoder_n_res_layers=4, merge_train_val=True, n_res_expand=0,
+              num_workers=10).run()
 
-    # Evaluator(model_name='Fusion2Mamba5', deterministic=True, dataset_name='davis', max_epochs=700, pocket_tops=3,
-    #           # max_head=False, attn_head=False, avg_head=True,
-    #           monitor_metric = 'val/CI', monitor_mode='max',
-    #           use_wandb_logger=True, wandb_project='DTA Benchmark', wandb_online=False,
-    #           encoder_n_res_layers=4,
-    #           decoder_dropout=0.1,
-    #           protein_encoder_n_layers=1, ligand_encoder_n_layers=1, bidirectional=False, merge_train_val=False, early_stop_patient=100,
-    #           root_data_dir='../../data', decoder_hidden_dims=(2048, 1024, 512), pretrained_model_name_or_path='facebook/esm2_t6_8M_UR50D',
-    #           encoder_embedding_dim=128, batch_size=256, comment='exp3', lr=1e-3,
-    #           num_workers=16).run(debug=True) #
-    exit()
+    Evaluator(model_name='Fusion2Mamba5', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs, pocket_tops=3,
+              max_head=False, attn_head=False, avg_head=True,
+              monitor_metric = 'val/CI', monitor_mode='max', cv_split_type='cold_target', cv_n_splits=4,
+              use_wandb_logger=True, wandb_project='DTA Benchmark model', wandb_online=False, comment='exp_v6/cold',
+              encoder_n_res_layers=4, merge_train_val=True, n_res_expand=0,
+              num_workers=10).run()
+
+    Evaluator(model_name='Fusion2Mamba5', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs, pocket_tops=3,
+              max_head=False, attn_head=False, avg_head=True,
+              monitor_metric = 'val/CI', monitor_mode='max', cv_split_type='all_cold', cv_n_splits=4,
+              use_wandb_logger=True, wandb_project='DTA Benchmark model', wandb_online=False, comment='exp_v6/cold',
+              encoder_n_res_layers=4, merge_train_val=True, n_res_expand=0,
+              num_workers=10).run()
 

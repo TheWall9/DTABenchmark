@@ -351,10 +351,10 @@ class DTAProcessMixin():
         info.update(affinity_info)
         info["num_proteins"] = len(proteins)
         info["num_ligands"] = len(ligands)
-        info['affinity_mean'] = np.mean(affinities['affinity'])
-        info['affinity_std'] = np.std(affinities['affinity'])
-        info['affinity_max'] = np.max(affinities['affinity'])
-        info['affinity_min'] = np.min(affinities['affinity'])
+        info['affinity_mean'] = float(np.mean(affinities['affinity']))
+        info['affinity_std'] = float(np.std(affinities['affinity']))
+        info['affinity_max'] = float(np.max(affinities['affinity']))
+        info['affinity_min'] = float(np.min(affinities['affinity']))
         return {"ligands": ligands,
                 "proteins": proteins,
                 "affinities": affinities}, info

@@ -72,21 +72,27 @@ class CrossValidationMixin():
                     kfold = KFold(n_splits=cv_n_splits+1, shuffle=True, random_state=seed)
                     for train_idx, valid_idx in kfold.split(items):
                         valid_id = items[valid_idx]
-                        valid_fold = np.where(pairs[:, offset].isin(valid_id))[0].tolist()
+                        valid_fold = np.where(np.isin(pairs[:, offset], valid_id))[0].tolist()
                         folds.append(valid_fold)
                     splits = {"train_folds": folds[1:],
                               "test_fold": folds[-1]}
                 elif split_type=='all_cold':
                     drugs = np.unique(pairs[:, 0])
                     targets = np.unique(pairs[:, 1])
-                    np.random.seed(seed)
-                    valid_drugs = np.random.choice(drugs, size=drugs//cv_n_splits, replace=False)
-                    valid_targets = np.random.choice(targets, size=targets//cv_n_splits, replace=False)
-                    mask = pairs[:, 0].isin(valid_drugs) & pairs[:, 1].isin(valid_targets)
-                    valid_fold = np.where(mask)[0].tolist()
-                    train_fold = np.where(~mask)[0].tolist()
-                    splits = {"train_folds":[train_fold],
-                              "test_fold":valid_fold}
+                    kfold = KFold(n_splits=cv_n_splits+1, shuffle=True, random_state=seed)
+                    train_folds, val_folds, test_folds = [], [], []
+                    for drug_idx, target_idx in zip(kfold.split(drugs), kfold.split(targets)):
+                        test_drug = drugs[drug_idx[1]]
+                        test_target = targets[target_idx[1]]
+                        test_mask = np.isin(pairs[:, 0], test_drug) & np.isin(pairs[:, 1], test_target)
+                        val_mask = ~test_mask & (np.isin(pairs[:, 0], test_drug) | np.isin(pairs[:, 1], test_target))
+                        train_mask = ~test_mask & ~val_mask
+                        train_folds.append(np.where(train_mask)[0].tolist())
+                        val_folds.append(np.where(val_mask)[0].tolist())
+                        test_folds.append(np.where(test_mask)[0].tolist())
+                    splits = {"train_folds":train_folds,
+                              "val_folds": [None for _ in val_folds],
+                              "test_folds":test_folds}
                 else:
                     raise NotImplementedError
                 if os.path.exists(cached_dir):
@@ -100,32 +106,44 @@ class CrossValidationMixin():
             with open(self.cv_splits_file, 'r') as f:
                 splits = json.load(f)
         data_size = max(map(lambda x:max(x), splits['train_folds']))
-        data_size = max(data_size, max(splits['test_fold'])) if len(splits['test_fold']) > 0 else data_size
-        mask = np.ones(data_size+1, dtype=bool)
-        if merge_train_val:
-            train_mask = mask.copy()
-            train_mask[splits['test_fold']] = False
-            dataset = copy.deepcopy(self) if deepcopy else copy.copy(self)
-            dataset.cv_train_val_test_index = [np.where(train_mask)[0].tolist(), splits['test_fold'], splits['test_fold']]
-            dataset.cv_fold_id = 0
-            yield dataset
-            for i, fold in enumerate(splits['train_folds']):
-                train_mask = mask.copy()
-                train_mask[fold] = False
-                dataset = copy.deepcopy(self) if deepcopy else copy.copy(self)
-                dataset.cv_train_val_test_index = [np.where(train_mask)[0].tolist(), fold, fold]
-                dataset.cv_fold_id = i+1
-                yield dataset
+        if "test_folds" in splits:
+            data_size = max(data_size, max(map(lambda x:max(x) if x is not None else 0, splits['test_folds'])))
+            data_size = max(data_size, max(map(lambda x: max(x) if x is not None else 0, splits['val_folds'])))
         else:
-            mask[splits['test_fold']] = False
-            for i, fold in enumerate(splits['train_folds']):
-                train_mask = mask.copy()
-                train_mask[fold] = False
-                dataset = copy.deepcopy(self) if deepcopy else copy.copy(self)
-                dataset.cv_train_val_test_index = [np.where(train_mask)[0].tolist(), fold, splits['test_fold']]
-                dataset.cv_fold_id = i
-                yield dataset
+            data_size = max(data_size, max(splits['test_fold'])) if len(splits['test_fold']) > 0 else data_size
 
+        mask = np.ones(data_size+1, dtype=bool)
+        folds = []
+        if "test_folds" in splits:
+            for train_fold, val_fold, test_fold in zip(splits['train_folds'], splits['val_folds'], splits['test_folds']):
+                val_fold = val_fold if val_fold is not None else []
+                test_fold = test_fold if test_fold is not None else []
+                if merge_train_val:
+                    train_fold.extend(val_fold)
+                    folds.append((train_fold, test_fold, test_fold))
+                else:
+                    folds.append((train_fold, val_fold, test_fold))
+        else:
+            if merge_train_val:
+                train_mask = mask.copy()
+                train_mask[splits['test_fold']] = False
+                folds.append([np.where(train_mask)[0].tolist(), splits['test_fold'], splits['test_fold']])
+                for i, fold in enumerate(splits['train_folds']):
+                    train_mask = mask.copy()
+                    train_mask[fold] = False
+                    folds.append([np.where(train_mask)[0].tolist(), fold, fold])
+            else:
+                mask[splits['test_fold']] = False
+                for i, fold in enumerate(splits['train_folds']):
+                    train_mask = mask.copy()
+                    train_mask[fold] = False
+                    folds.append([np.where(train_mask)[0].tolist(), fold, splits['test_fold']])
+
+        for i, fold in enumerate(folds):
+            dataset = copy.deepcopy(self) if deepcopy else copy.copy(self)
+            dataset.cv_train_val_test_index = fold
+            dataset.cv_fold_id = i
+            yield dataset
 
 
 
@@ -172,6 +190,15 @@ class DataModule(LightningDataModule, CrossValidationMixin):
         return os.path.join(self.dataset_name, f"{self.config['cv_split_type']}",
                             f"{self.config['cv_n_splits']}_{self.config['cv_split_seed']}_{self.cv_fold_id}")
 
+    def generate_splits(self, dataset, split_type='predetermined', cv_n_splits=5, seed=666,
+                           splits=None, overwrite=False, cached_data_dir=None):
+        if split_type in ['cv', 'cv_no_test', 'predetermined']:
+            return self.generate_cv_splits(np.arange(len(dataset)), split_type, cv_n_splits, seed, splits, overwrite, cached_data_dir)
+        elif split_type in ['cold_drug', 'cold_target', 'all_cold']:
+            return self.generate_cold_splits(dataset[['LID', 'PID']].values, split_type, cv_n_splits, seed, splits, overwrite, cached_data_dir)
+        else:
+            raise NotImplementedError
+
     def prepare_data(self):
         split_type = self.config['cv_split_type']
         cv_n_splits = self.config['cv_n_splits']
@@ -179,7 +206,7 @@ class DataModule(LightningDataModule, CrossValidationMixin):
         overwrite = self.config['overwrite']
         if self.preprocessed_data is None:
             raw_data = DTADatasetBase.load_data(self.root_data_dir, dataset_name=self.dataset_name)
-            splits = self.generate_cv_splits(np.arange(raw_data['data_size']), split_type=split_type, cv_n_splits=cv_n_splits, seed=seed,
+            splits = self.generate_splits(raw_data['affinities'].to_pandas(), split_type=split_type, cv_n_splits=cv_n_splits, seed=seed,
                                              splits=raw_data.get("cv_splits"), overwrite=overwrite, cached_data_dir=self.cached_data_dir)
             preprocessed_data, self.dataset_info = self.dataset_cls.preprocess(config=self.config, **raw_data)
             self.preprocessed_data = self.dataset_cls(input_columns=self.input_columns, **preprocessed_data)
