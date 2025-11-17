@@ -2,7 +2,8 @@
 # Requirements
 ``` bash
 conda create -n py10 python=3.10
-conda
+conda activate py10
+
 conda install libstdcxx-ng>=14 -c conda-forge
 conda install fpocket reduce -c bioconda
 conda install openbabel -c conda-forge
