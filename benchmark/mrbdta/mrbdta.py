@@ -2,7 +2,7 @@ from torch.nn import functional as F
 
 from benchmark.deepdta import DeepDTADataset
 from toolbox import ModelBase
-from benchmark.mrbdta.MRBDTA import Transformer
+from benchmark.mrbdta.model import Transformer
 
 
 
