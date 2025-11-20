@@ -1,4 +1,3 @@
-
 import torch
 from torch import nn, optim
 from torch.nn import functional as F
@@ -13,7 +12,8 @@ import numpy as np
 from toolbox import datamodule
 from toolbox.featurizer.ligand import SimpleSmilesTokenFeaturizer, Mol3dGraphFeaturizer, MorganFeaturizer, \
     GraphMVPFeaturizer, GraphMVP3dPointFeaturizer, MolFeaturizerBase, UnimolFeaturizer
-from toolbox.featurizer.protein import SimpleProtTokenFeaturizer, LLMStructFeaturizer, STRUCT_ROOT_DIR, LLMFeaturizer, PocketGVPFeaturizer
+from toolbox.featurizer.protein import SimpleProtTokenFeaturizer, LLMStructFeaturizer, STRUCT_ROOT_DIR, LLMFeaturizer, \
+    PocketGVPFeaturizer
 from toolbox.featurizer.tools import FeaturizerBase, GraphData, FeatData
 from toolbox.utils import serialize3d
 from toolbox import ModelBase
@@ -28,12 +28,12 @@ def reorder_graph(graph, node_order, reverse_order, attr_keys=None):
         if data is None:
             continue
         if 'edge_index' in key:
-            index_map = {o:i for i, o in enumerate(node_order)}
+            index_map = {o: i for i, o in enumerate(node_order)}
             new_edge_index = np.array([index_map[item] for item in data.flatten()]).reshape(data.shape)
             ans[key] = new_edge_index
         elif 'edge' in key:
             ans[key] = data
-        elif len(node_order)==len(data):
+        elif len(node_order) == len(data):
             if isinstance(data, np.ndarray):
                 data = data[node_order]
             else:
@@ -43,6 +43,7 @@ def reorder_graph(graph, node_order, reverse_order, attr_keys=None):
             ans[key] = data
     ans['reverse_order_batch'] = reverse_order
     return GraphData(**ans)
+
 
 def serailize_graph(graph, batch_key, keys):
     pos = getattr(graph, 'pos')
@@ -81,9 +82,12 @@ class FusionLigandFeaturizer(FeaturizerBase):
         ans['num_ligand_tokens'] = self.smiles_featurizer.tokenizer.get_vocab_size()
         return ans
 
+
 class FusionProteinFeaturizer(FeaturizerBase):
-    def __init__(self, struct_root_dir=STRUCT_ROOT_DIR, struct_type='esmfold', pocket_type='dogsite3', pocket_top=3, n_res_expand=10,
-                 edge_num=10, rbf_num=16, pretrained_model_name_or_path="facebook/esm2_t6_8M_UR50D", feat_type='cls', serailize_protein_graph=True,):
+    def __init__(self, struct_root_dir=STRUCT_ROOT_DIR, struct_type='esmfold', pocket_type='dogsite3', pocket_top=3,
+                 n_res_expand=10,
+                 edge_num=10, rbf_num=16, pretrained_model_name_or_path="facebook/esm2_t6_8M_UR50D", feat_type='cls',
+                 serailize_protein_graph=True, ):
         super().__init__()
         self.struct_root_dir = struct_root_dir
         self.struct_type = struct_type
@@ -95,18 +99,21 @@ class FusionProteinFeaturizer(FeaturizerBase):
         self.rbf_num = rbf_num
         self.serailize_protein_graph = serailize_protein_graph
         self.struct_featurizer = LLMStructFeaturizer(struct_root_dir=struct_root_dir, pocket_top=pocket_top,
-                                                     struct_type=struct_type, pocket_type=pocket_type, n_res_expand=n_res_expand,
+                                                     struct_type=struct_type, pocket_type=pocket_type,
+                                                     n_res_expand=n_res_expand,
                                                      pretrained_model_name_or_path=pretrained_model_name_or_path)
-        self.seq_featurizer = LLMFeaturizer(pretrained_model_name_or_path=pretrained_model_name_or_path, feat_type=feat_type)
+        self.seq_featurizer = LLMFeaturizer(pretrained_model_name_or_path=pretrained_model_name_or_path,
+                                            feat_type=feat_type)
 
     def _featurize(self, datapoint, **kwargs):
         struct = self.struct_featurizer.featurize([datapoint])[0]
         cls = self.seq_featurizer.featurize([datapoint])[0]
         graph = struct.graph
-        graph.pos = graph.pos[:,1]
+        graph.pos = graph.pos[:, 1]
         if self.serailize_protein_graph:
             seq = graph.seq.copy()
-            forward_graph, backward_graph = serailize_graph(graph, batch_key='node_batch', keys=['node_features', 'pos', 'seq'])
+            forward_graph, backward_graph = serailize_graph(graph, batch_key='node_batch',
+                                                            keys=['node_features', 'pos', 'seq'])
             forward_graph.seq = seq
         else:
             forward_graph = graph
@@ -121,6 +128,7 @@ class FusionProteinFeaturizer(FeaturizerBase):
 class FusionDataset(datamodule.DTADatasetBase):
     ligand_featurizer_cls = FusionLigandFeaturizer
     protein_featurizer_cls = FusionProteinFeaturizer
+
     def __init__(self, proteins, ligands, affinities, input_columns=None):
         super().__init__(proteins, ligands, affinities, input_columns=input_columns)
         self.to_pandas()
@@ -139,20 +147,20 @@ class PoolLayer(nn.Module):
 
     def mean_pool(self, x, mask):
         """x:BxLxD  mask:BxL"""
-        if x.ndim==2:
+        if x.ndim == 2:
             return gnn.global_mean_pool(x, mask.long())
-        return (x*mask.unsqueeze(-1)).sum(dim=1)/mask.sum(dim=1, keepdim=True)
+        return (x * mask.unsqueeze(-1)).sum(dim=1) / mask.sum(dim=1, keepdim=True)
 
     def max_pool(self, x, mask):
-        if x.ndim==2:
+        if x.ndim == 2:
             return gnn.global_max_pool(x, mask.long())
         x = x.masked_fill(~mask.unsqueeze(-1).bool(), -torch.inf)
         h, _ = x.max(dim=1)
         return h
 
     def attention_pool(self, x, mask):
-        scores = x@self.query
-        if x.ndim==2:
+        scores = x @ self.query
+        if x.ndim == 2:
             scores = gnn_softmax(scores, index=mask.long())
             # h = gnn.global_add_pool(scores*x, mask)
             value = scatter_add(x.unsqueeze(1) * scores.unsqueeze(-1), index=mask.long(), dim=0)
@@ -189,12 +197,11 @@ class MambaEncoder3d(nn.Module):
         self.embedding_feat = nn.Linear(input_dim, embedding_dim)
         self.pool = PoolLayer(embedding_dim, avg_head=avg_head, max_head=max_head, attn_head=attn_head)
 
-
     def forward(self, pos, pos_idx, pos_feat=None, pool_index=None):
         inputs_embeds = self.embedding_pos(pos)
         if pos_feat is not None:
             pos_feat = self.embedding_feat(pos_feat)
-            inputs_embeds = inputs_embeds+pos_feat
+            inputs_embeds = inputs_embeds + pos_feat
         inputs = inputs_embeds.unsqueeze(0)
         seq_idx = pos_idx.unsqueeze(0).int()
         pool_index = pool_index if pool_index is not None else pos_idx
@@ -204,7 +211,8 @@ class MambaEncoder3d(nn.Module):
 
 
 class MambaTokenEncoder(nn.Module):
-    def __init__(self, model, hidden_dim, input_dim=None, num_embeddings=None, avg_head=False, max_head=True, attn_head=False):
+    def __init__(self, model, hidden_dim, input_dim=None, num_embeddings=None, avg_head=False, max_head=True,
+                 attn_head=False):
         super(MambaTokenEncoder, self).__init__()
         if num_embeddings is not None:
             self.embedding = nn.Embedding(num_embeddings, hidden_dim)
@@ -232,7 +240,7 @@ class MambaTokenEncoder(nn.Module):
 class CombinedDecoder(nn.Module):
     def __init__(self, input_dim1, input_dim2, hidden_dims=(1024, 1024, 512), dropout=0.1, norm=False):
         super().__init__()
-        dims = [input_dim1+input_dim2]+list(hidden_dims)
+        dims = [input_dim1 + input_dim2] + list(hidden_dims)
         model = []
         for i, (dim_in, dim_out) in enumerate(zip(dims[:-1], dims[1:])):
             model.append(nn.Linear(dim_in, dim_out))
@@ -249,6 +257,50 @@ class CombinedDecoder(nn.Module):
         return output
 
 
+class LSTMEncoder(nn.Module):
+    def __init__(self, d_model, n_layer, bidirectional=False):
+        super().__init__()
+        self.model = nn.LSTM(d_model, d_model//2 if bidirectional else d_model, n_layer, bidirectional=bidirectional, batch_first=True)
+
+    def forward(self, x, seq_len=None, seq_idx=None):
+        mask = None
+        if x.shape[0]==1:
+            x, mask = to_dense_batch(x[0], batch=seq_idx.reshape(-1))
+        output, (hn, cn) = self.model(x)
+        if mask is not None:
+            output = output[mask].unsqueeze(0)
+        return output
+
+
+class TransformerEncoder(nn.Module):
+    def __init__(self, d_model=128, num_heads=8, d_ffn=512, n_layer=4, dropout=0.1):
+        super().__init__()
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=num_heads,
+            dim_feedforward=d_ffn,
+            dropout=dropout,
+            activation='gelu',
+            batch_first=True
+        )
+        self.encoder = nn.TransformerEncoder(
+            encoder_layer=encoder_layer,
+            num_layers=n_layer  # 5 层
+        )
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(self, x, seq_len=None, seq_idx=None):
+        mask = None
+        src_key_padding_mask = None
+        if x.shape[0]==1:
+            x, mask = to_dense_batch(x[0], batch=seq_idx.reshape(-1))
+            src_key_padding_mask = ~mask
+        x = self.encoder(x, src_key_padding_mask=src_key_padding_mask)
+        if mask is not None:
+            x = x[mask].unsqueeze(0)
+        return self.norm(x)
+
+
 class LigandEncoder(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -261,19 +313,29 @@ class LigandEncoder(nn.Module):
         attn_head = config['attn_head']
         bidirectional = config['bidirectional']
         dropout = config['encoder_dropout']
-        d_ff = 4*encoder_embedding_dim
-        mamba1 = MambaEncoder(d_model=encoder_embedding_dim, n_layer=n_layer, ssm_cfg={"layer": mamba_version},
-                              d_ff=d_ff, bidirectional=bidirectional, dropout=dropout)
-        mamba3 = MambaEncoder(d_model=encoder_embedding_dim, n_layer=n_layer, ssm_cfg={"layer": mamba_version},
-                              d_ff=d_ff, bidirectional=bidirectional, dropout=dropout)
-        if not config['exclusive_ssm']:
-            mamba1.binding_ssm(mamba3)
+        d_ff = 4 * encoder_embedding_dim
+
+        if mamba_version == 'MHA':
+            mamba1 = TransformerEncoder(d_model=encoder_embedding_dim, n_layer=n_layer, d_ffn=d_ff, dropout=dropout)
+            mamba3 = TransformerEncoder(d_model=encoder_embedding_dim, n_layer=n_layer, d_ffn=d_ff, dropout=dropout)
+        elif mamba_version == 'LSTM':
+            mamba1 = LSTMEncoder(d_model=encoder_embedding_dim, n_layer=n_layer, bidirectional=bidirectional)
+            mamba3 = LSTMEncoder(d_model=encoder_embedding_dim, n_layer=n_layer, bidirectional=bidirectional)
+        elif mamba_version in ['Mamba1', 'Mamba2']:
+            mamba1 = MambaEncoder(d_model=encoder_embedding_dim, n_layer=n_layer, ssm_cfg={"layer": mamba_version},
+                                  d_ff=d_ff, bidirectional=bidirectional, dropout=dropout)
+            mamba3 = MambaEncoder(d_model=encoder_embedding_dim, n_layer=n_layer, ssm_cfg={"layer": mamba_version},
+                                  d_ff=d_ff, bidirectional=bidirectional, dropout=dropout)
+            if not config['exclusive_ssm']:
+                mamba1.binding_ssm(mamba3)
+
         self.encoder_0d, self.encoder_1d, self.encoder_3d = None, None, None
         if config['use_ligand_0d']:
-            self.encoder_0d = nn.Sequential(nn.Linear(config['ligand_embedding_dim'], encoder_embedding_dim*2),
+            self.encoder_0d = nn.Sequential(nn.Linear(config['ligand_embedding_dim'], encoder_embedding_dim * 2),
                                             nn.GLU())
         if config['use_ligand_1d']:
-            self.encoder_1d = MambaTokenEncoder(mamba1, encoder_embedding_dim, num_embeddings=config['num_ligand_tokens'],
+            self.encoder_1d = MambaTokenEncoder(mamba1, encoder_embedding_dim,
+                                                num_embeddings=config['num_ligand_tokens'],
                                                 avg_head=avg_head, max_head=max_head, attn_head=attn_head)
         if config['use_ligand_3d']:
             self.encoder_3d = MambaEncoder3d(mamba3, config['ligand_graph_node_features_dim'], encoder_embedding_dim,
@@ -294,7 +356,7 @@ class LigandEncoder(nn.Module):
                 dims.append(encoder_embedding_dim)
             if config['use_ligand_3d']:
                 dims.append(encoder_embedding_dim)
-        assert sum(dims)!=0
+        assert sum(dims) != 0
         self.output_project = nn.Linear(sum(dims), encoder_output_dim)
         encoder_n_res_layers = config['encoder_n_res_layers']
         self.res_layers = nn.ModuleList()
@@ -318,7 +380,7 @@ class LigandEncoder(nn.Module):
         output = self.output_project(embeddings)
         output = F.normalize(output, dim=-1)
         for layer in self.res_layers:
-            output = layer(output)+output
+            output = layer(output) + output
         return output
 
 
@@ -334,19 +396,27 @@ class ProtEncoder(nn.Module):
         mamba_version = config['mamba_version']
         bidirectional = config['bidirectional']
         dropout = config['encoder_dropout']
-        d_ff = 4*encoder_embedding_dim
-        mamba1 = MambaEncoder(d_model=encoder_embedding_dim, n_layer=n_layer, ssm_cfg={"layer": mamba_version},
-                              d_ff=d_ff, bidirectional=bidirectional, dropout=dropout)
-        mamba3 = MambaEncoder(d_model=encoder_embedding_dim, n_layer=n_layer, ssm_cfg={"layer": mamba_version},
-                              d_ff=d_ff, bidirectional=bidirectional, dropout=dropout)
-        if not config['exclusive_ssm']:
-            mamba1.binding_ssm(mamba3)
+        d_ff = 4 * encoder_embedding_dim
+        if mamba_version == 'MHA':
+            mamba1 = TransformerEncoder(d_model=encoder_embedding_dim, n_layer=n_layer, d_ffn=d_ff, dropout=dropout)
+            mamba3 = TransformerEncoder(d_model=encoder_embedding_dim, n_layer=n_layer, d_ffn=d_ff, dropout=dropout)
+        elif mamba_version == 'LSTM':
+            mamba1 = LSTMEncoder(d_model=encoder_embedding_dim, n_layer=n_layer, bidirectional=bidirectional)
+            mamba3 = LSTMEncoder(d_model=encoder_embedding_dim, n_layer=n_layer, bidirectional=bidirectional)
+        elif mamba_version in ['Mamba1', 'Mamba2']:
+            mamba1 = MambaEncoder(d_model=encoder_embedding_dim, n_layer=n_layer, ssm_cfg={"layer": mamba_version},
+                                  d_ff=d_ff, bidirectional=bidirectional, dropout=dropout)
+            mamba3 = MambaEncoder(d_model=encoder_embedding_dim, n_layer=n_layer, ssm_cfg={"layer": mamba_version},
+                                  d_ff=d_ff, bidirectional=bidirectional, dropout=dropout)
+            if not config['exclusive_ssm']:
+                mamba1.binding_ssm(mamba3)
         self.encoder_0d, self.encoder_1d, self.encoder_3d = None, None, None
         if config['use_protein_0d']:
-            self.encoder_0d = nn.Sequential(nn.Linear(config['protein_embedding_dim'], encoder_embedding_dim*2),
+            self.encoder_0d = nn.Sequential(nn.Linear(config['protein_embedding_dim'], encoder_embedding_dim * 2),
                                             nn.GLU())
         if config['use_protein_1d']:
-            self.encoder_1d = MambaTokenEncoder(mamba1, encoder_embedding_dim, num_embeddings=config['num_protein_tokens'],
+            self.encoder_1d = MambaTokenEncoder(mamba1, encoder_embedding_dim,
+                                                num_embeddings=config['num_protein_tokens'],
                                                 avg_head=avg_head, max_head=max_head, attn_head=attn_head)
         if config['use_protein_3d']:
             self.encoder_3d = MambaEncoder3d(mamba3, config['protein_graph_node_features_dim'], encoder_embedding_dim,
@@ -367,7 +437,7 @@ class ProtEncoder(nn.Module):
                 dims.append(encoder_embedding_dim)
             if config['use_protein_3d']:
                 dims.append(encoder_embedding_dim)
-        assert sum(dims)!=0
+        assert sum(dims) != 0
         self.output_project = nn.Linear(sum(dims), encoder_output_dim)
         encoder_n_res_layers = config['encoder_n_res_layers']
         self.res_layers = nn.ModuleList()
@@ -375,7 +445,6 @@ class ProtEncoder(nn.Module):
             self.res_layers.append(nn.Sequential(nn.Linear(encoder_output_dim, encoder_output_dim),
                                                  nn.ReLU(inplace=True),
                                                  nn.Dropout(dropout)))
-
 
     def forward(self, embedding, graph):
         embeddings = []
@@ -394,13 +463,13 @@ class ProtEncoder(nn.Module):
         output = self.output_project(embedding)
         output = F.normalize(output, dim=-1)
         for layer in self.res_layers:
-            output = layer(output)+output
+            output = layer(output) + output
         return output
-
 
 
 class Fusion2Mamba6(ModelBase):
     dataset_cls = FusionDataset
+
     def __init__(self, config):
         super().__init__(config)
         encoder_output_dim = config['encoder_output_dim']
@@ -452,7 +521,7 @@ class Fusion2Mamba6(ModelBase):
         protein = self.protein_encoder(protein_embedding, protein_graph)
         predict = self.decoder(ligand, protein)
         if self.use_z_score:
-            predict = predict*self.std+self.mean
+            predict = predict * self.std + self.mean
         return predict
 
     def step(self, ligand_embedding, ligand_input_ids, ligand_graph,
@@ -469,17 +538,16 @@ class Fusion2Mamba6(ModelBase):
         super().on_validation_epoch_end()
         preds = torch.cat(self.val_metric.preds)
         self.logger.experiment.add_histogram(tag='val/preds', global_step=self.global_step, values=preds)
-        if self.current_epoch==0:
+        if self.current_epoch == 0:
             targets = torch.cat(self.val_metric.targets)
             self.logger.experiment.add_histogram(tag='val/targets', global_step=self.global_step, values=targets)
-
 
     def configure_optimizers(self):
         lr = self.config['lr']
         lr_scale = self.config['lr_scale']
         lr_gamma = self.config['lr_gamma']
         optimizer = optim.Adam(self.parameters(), lr=lr)
-        lr_scheduler = optim.lr_scheduler.CyclicLR(optimizer, base_lr=lr_scale*lr, max_lr=lr,
+        lr_scheduler = optim.lr_scheduler.CyclicLR(optimizer, base_lr=lr_scale * lr, max_lr=lr,
                                                    gamma=lr_gamma, mode="exp_range", step_size_up=20,
                                                    cycle_momentum=False)
         return {"optimizer": optimizer,
@@ -500,31 +568,35 @@ class Fusion2Mamba6(ModelBase):
 
 if __name__ == '__main__':
     from toolbox import Evaluator
+
     dataset_name = 'davis'
     max_epochs = 500
 
     ################################# cold  #############################################
-    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs, pocket_tops=3,
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs,
+              pocket_tops=3,
               max_head=False, attn_head=False, avg_head=True,
-              monitor_metric = 'val/CI', monitor_mode='max', cv_split_type='cold_drug', cv_n_splits=4,
+              monitor_metric='val/CI', monitor_mode='max', cv_split_type='cold_drug', cv_n_splits=4,
               use_wandb_logger=True, wandb_project='DTA Benchmark model', wandb_online=True, comment='exp_v0',
               encoder_n_res_layers=4, merge_train_val=True, n_res_expand=0,
               use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
               use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
               num_workers=10).run()
 
-    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs, pocket_tops=3,
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs,
+              pocket_tops=3,
               max_head=False, attn_head=False, avg_head=True,
-              monitor_metric = 'val/CI', monitor_mode='max', cv_split_type='cold_target', cv_n_splits=4,
+              monitor_metric='val/CI', monitor_mode='max', cv_split_type='cold_target', cv_n_splits=4,
               use_wandb_logger=True, wandb_project='DTA Benchmark model', wandb_online=True, comment='exp_v0',
               encoder_n_res_layers=4, merge_train_val=True, n_res_expand=0,
               use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
               use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
               num_workers=10).run()
 
-    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs, pocket_tops=3,
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs,
+              pocket_tops=3,
               max_head=False, attn_head=False, avg_head=True,
-              monitor_metric = 'val/CI', monitor_mode='max', cv_split_type='all_cold', cv_n_splits=4,
+              monitor_metric='val/CI', monitor_mode='max', cv_split_type='all_cold', cv_n_splits=4,
               use_wandb_logger=True, wandb_project='DTA Benchmark model', wandb_online=True, comment='exp_v0',
               encoder_n_res_layers=4, merge_train_val=True, n_res_expand=0,
               use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
@@ -532,7 +604,6 @@ if __name__ == '__main__':
               num_workers=10).run()
     # exit()
     ################################# 5 fold #############################################
-
 
     # Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs, pocket_tops=3,
     #           max_head=False, attn_head=False, avg_head=True,
@@ -545,33 +616,35 @@ if __name__ == '__main__':
 
     # exit()
     ################################# serailize graph #############################################
-    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs, pocket_tops=3,
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs,
+              pocket_tops=3,
               max_head=False, attn_head=False, avg_head=True,
-              monitor_metric = 'val/CI', monitor_mode='max',
+              monitor_metric='val/CI', monitor_mode='max',
               use_wandb_logger=True, wandb_project='DTA Benchmark variant2', wandb_online=True, comment='exp_v6/other',
               encoder_n_res_layers=4, merge_train_val=True, serailize_ligand_graph=False, serailize_protein_graph=False,
               use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True, n_res_expand=0,
               use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
               num_workers=10).run()
 
-    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs, pocket_tops=3,
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs,
+              pocket_tops=3,
               max_head=False, attn_head=False, avg_head=True,
-              monitor_metric = 'val/CI', monitor_mode='max',
+              monitor_metric='val/CI', monitor_mode='max',
               use_wandb_logger=True, wandb_project='DTA Benchmark variant2', wandb_online=True, comment='exp_v6/other',
               encoder_n_res_layers=4, merge_train_val=True, use_z_score=True,
               use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True, n_res_expand=0,
               use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
               num_workers=10).run()
 
-    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs, pocket_tops=3,
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs,
+              pocket_tops=3,
               max_head=False, attn_head=False, avg_head=True,
-              monitor_metric = 'val/CI', monitor_mode='max',
+              monitor_metric='val/CI', monitor_mode='max',
               use_wandb_logger=True, wandb_project='DTA Benchmark variant2', wandb_online=True, comment='exp_v6/other',
               encoder_n_res_layers=4, merge_train_val=True, exclusive_ssm=True,
               use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
               use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
               num_workers=10).run()
-
 
     ################################# pocket res expand #############################################
     # Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs, pocket_tops=3,
@@ -611,135 +684,158 @@ if __name__ == '__main__':
     #           num_workers=10).run() #
     # exit()
     ################################# pretrained_model_name_or_path #############################################
-    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs, pocket_tops=3,
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs,
+              pocket_tops=3,
               max_head=False, attn_head=False, avg_head=True,
-              monitor_metric = 'val/CI', monitor_mode='max',
+              monitor_metric='val/CI', monitor_mode='max',
               use_wandb_logger=True, wandb_project='DTA Benchmark variant2', wandb_online=True, comment='exp_v6/llm',
               encoder_n_res_layers=4, merge_train_val=True, pretrained_model_name_or_path='facebook/esm2_t12_35M_UR50D',
               use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True, n_res_expand=0,
               use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
-              num_workers=10).run() #
+              num_workers=10).run()  #
 
-    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs, pocket_tops=3,
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs,
+              pocket_tops=3,
               max_head=False, attn_head=False, avg_head=True,
-              monitor_metric = 'val/CI', monitor_mode='max',
+              monitor_metric='val/CI', monitor_mode='max',
               use_wandb_logger=True, wandb_project='DTA Benchmark variant2', wandb_online=True, comment='exp_v6/llm',
-              encoder_n_res_layers=4, merge_train_val=True, pretrained_model_name_or_path='facebook/esm2_t30_150M_UR50D',
+              encoder_n_res_layers=4, merge_train_val=True,
+              pretrained_model_name_or_path='facebook/esm2_t30_150M_UR50D',
               use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True, n_res_expand=0,
               use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
-              num_workers=10).run() #
+              num_workers=10).run()  #
 
-    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs, pocket_tops=3,
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs,
+              pocket_tops=3,
               max_head=False, attn_head=False, avg_head=True,
-              monitor_metric = 'val/CI', monitor_mode='max',
+              monitor_metric='val/CI', monitor_mode='max',
               use_wandb_logger=True, wandb_project='DTA Benchmark variant2', wandb_online=True, comment='exp_v6/llm',
               encoder_n_res_layers=4, merge_train_val=True, pretrained_model_name_or_path='Rostlab/prot_bert',
               use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True, n_res_expand=0,
               use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
-              num_workers=10).run() #
+              num_workers=10).run()  #
     # exit()
     ################################# pocket_tops #############################################
-    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs, pocket_tops=2,
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs,
+              pocket_tops=2,
               max_head=False, attn_head=False, avg_head=True,
-              monitor_metric = 'val/CI', monitor_mode='max',
-              use_wandb_logger=True, wandb_project='DTA Benchmark variant2', wandb_online=True, comment='exp_v6/pocket_tops',
+              monitor_metric='val/CI', monitor_mode='max',
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant2', wandb_online=True,
+              comment='exp_v6/pocket_tops',
               encoder_n_res_layers=4, merge_train_val=True, n_res_expand=0,
               use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
               use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
-              num_workers=10).run() #
+              num_workers=10).run()  #
 
-    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs, pocket_tops=1,
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs,
+              pocket_tops=1,
               max_head=False, attn_head=False, avg_head=True,
-              monitor_metric = 'val/CI', monitor_mode='max',
-              use_wandb_logger=True, wandb_project='DTA Benchmark variant2', wandb_online=True, comment='exp_v6/pocket_tops',
+              monitor_metric='val/CI', monitor_mode='max',
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant2', wandb_online=True,
+              comment='exp_v6/pocket_tops',
               encoder_n_res_layers=4, merge_train_val=True, n_res_expand=0,
               use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
               use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
-              num_workers=10).run() #
+              num_workers=10).run()  #
 
-    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs, pocket_tops=4,
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs,
+              pocket_tops=4,
               max_head=False, attn_head=False, avg_head=True,
-              monitor_metric = 'val/CI', monitor_mode='max',
-              use_wandb_logger=True, wandb_project='DTA Benchmark variant2', wandb_online=True, comment='exp_v6/pocket_tops',
+              monitor_metric='val/CI', monitor_mode='max',
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant2', wandb_online=True,
+              comment='exp_v6/pocket_tops',
               encoder_n_res_layers=4, merge_train_val=True,
               use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True, n_res_expand=0,
               use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
-              num_workers=10).run() #
+              num_workers=10).run()  #
 
-    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs, pocket_tops=5,
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs,
+              pocket_tops=5,
               max_head=False, attn_head=False, avg_head=True,
-              monitor_metric = 'val/CI', monitor_mode='max',
-              use_wandb_logger=True, wandb_project='DTA Benchmark variant2', wandb_online=True, comment='exp_v6/pocket_tops',
+              monitor_metric='val/CI', monitor_mode='max',
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant2', wandb_online=True,
+              comment='exp_v6/pocket_tops',
               encoder_n_res_layers=4, merge_train_val=True,
               use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True, n_res_expand=0,
               use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
-              num_workers=10).run() #
+              num_workers=10).run()  #
 
     # exit()
     ################################# protein 0/1/3d #############################################
-    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs, pocket_tops=3,
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs,
+              pocket_tops=3,
               max_head=False, attn_head=False, avg_head=True,
-              monitor_metric = 'val/CI', monitor_mode='max',
-              use_wandb_logger=True, wandb_project='DTA Benchmark variant2', wandb_online=True, comment='exp_v6/protein',
+              monitor_metric='val/CI', monitor_mode='max',
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant2', wandb_online=True,
+              comment='exp_v6/protein',
               encoder_n_res_layers=4, merge_train_val=True,
               use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True, n_res_expand=0,
               use_protein_0d=True, use_protein_1d=True, use_protein_3d=True,
-              num_workers=10).run() #
+              num_workers=10).run()  #
 
     # exit()
 
-    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs, pocket_tops=3,
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs,
+              pocket_tops=3,
               max_head=False, attn_head=False, avg_head=True,
-              monitor_metric = 'val/CI', monitor_mode='max',
-              use_wandb_logger=True, wandb_project='DTA Benchmark variant2', wandb_online=True, comment='exp_v6/protein',
+              monitor_metric='val/CI', monitor_mode='max',
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant2', wandb_online=True,
+              comment='exp_v6/protein',
               encoder_n_res_layers=4, merge_train_val=True,
               use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True,
               use_protein_0d=True, use_protein_1d=False, use_protein_3d=False, n_res_expand=0,
-              num_workers=10).run() #
+              num_workers=10).run()  #
 
-    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs, pocket_tops=3,
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs,
+              pocket_tops=3,
               max_head=False, attn_head=False, avg_head=True,
-              monitor_metric = 'val/CI', monitor_mode='max',
-              use_wandb_logger=True, wandb_project='DTA Benchmark variant2', wandb_online=True, comment='exp_v6/protein',
+              monitor_metric='val/CI', monitor_mode='max',
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant2', wandb_online=True,
+              comment='exp_v6/protein',
               encoder_n_res_layers=4, merge_train_val=True,
               use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True, n_res_expand=0,
               use_protein_0d=False, use_protein_1d=True, use_protein_3d=False,
-              num_workers=10).run() #
+              num_workers=10).run()  #
 
-    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs, pocket_tops=3,
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs,
+              pocket_tops=3,
               max_head=False, attn_head=False, avg_head=True,
-              monitor_metric = 'val/CI', monitor_mode='max',
-              use_wandb_logger=True, wandb_project='DTA Benchmark variant2', wandb_online=True, comment='exp_v6/protein',
+              monitor_metric='val/CI', monitor_mode='max',
+              use_wandb_logger=True, wandb_project='DTA Benchmark variant2', wandb_online=True,
+              comment='exp_v6/protein',
               encoder_n_res_layers=4, merge_train_val=True,
               use_ligand_0d=True, use_ligand_1d=True, use_ligand_3d=True, n_res_expand=0,
               use_protein_0d=False, use_protein_1d=False, use_protein_3d=True,
-              num_workers=10).run() #
+              num_workers=10).run()  #
 
     # exit()
     ################################# ligand 0/1/3d #############################################
-    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs, pocket_tops=3,
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs,
+              pocket_tops=3,
               max_head=False, attn_head=False, avg_head=True,
-              monitor_metric = 'val/CI', monitor_mode='max',
+              monitor_metric='val/CI', monitor_mode='max',
               use_wandb_logger=True, wandb_project='DTA Benchmark variant2', wandb_online=True, comment='exp_v6/ligand',
               encoder_n_res_layers=4, merge_train_val=True,
               use_ligand_0d=True, use_ligand_1d=False, use_ligand_3d=False,
               use_protein_0d=True, use_protein_1d=False, use_protein_3d=True, n_res_expand=0,
-              num_workers=10).run() #
+              num_workers=10).run()  #
 
-    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs, pocket_tops=3,
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs,
+              pocket_tops=3,
               max_head=False, attn_head=False, avg_head=True,
-              monitor_metric = 'val/CI', monitor_mode='max',
+              monitor_metric='val/CI', monitor_mode='max',
               use_wandb_logger=True, wandb_project='DTA Benchmark variant2', wandb_online=True, comment='exp_v6/ligand',
               encoder_n_res_layers=4, merge_train_val=True,
               use_ligand_0d=False, use_ligand_1d=True, use_ligand_3d=False,
               use_protein_0d=True, use_protein_1d=False, use_protein_3d=True, n_res_expand=0,
-              num_workers=10).run() #
+              num_workers=10).run()  #
 
-    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs, pocket_tops=3,
+    Evaluator(model_name='Fusion2Mamba6', deterministic=True, dataset_name=dataset_name, max_epochs=max_epochs,
+              pocket_tops=3,
               max_head=False, attn_head=False, avg_head=True,
-              monitor_metric = 'val/CI', monitor_mode='max',
+              monitor_metric='val/CI', monitor_mode='max',
               use_wandb_logger=True, wandb_project='DTA Benchmark variant2', wandb_online=True, comment='exp_v6/ligand',
               encoder_n_res_layers=4, merge_train_val=True,
               use_ligand_0d=False, use_ligand_1d=False, use_ligand_3d=True, n_res_expand=0,
               use_protein_0d=True, use_protein_1d=False, use_protein_3d=True,
-              num_workers=10).run() #
+              num_workers=10).run()  #

@@ -32,7 +32,7 @@ class PocketDTAProtFeaturizer(FeaturizerBase):
     def __init__(self, struct_root_dir=STRUCT_ROOT_DIR, pocket_type='dogsite3', top=3):
         super().__init__()
         self.seq_featurizer = LLMFeaturizer(feat_type='mean')
-        self.struct_featurizer = PocketGVPFeaturizer(struct_root_dir, top=top, pocket_type=pocket_type)
+        self.struct_featurizer = PocketGVPFeaturizer(struct_root_dir, pocket_top=top, pocket_type=pocket_type)
         self.struct_root_dir = struct_root_dir
         self.pocket_type = pocket_type
         self.top = top
