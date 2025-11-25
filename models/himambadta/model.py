@@ -266,6 +266,12 @@ class LigandEncoder(nn.Module):
         if max_head:
             dims.append(encoder_embedding_dim*2)
         self.output_project = nn.Linear(sum(dims), encoder_output_dim)
+        encoder_n_res_layers = config['encoder_n_res_layers']
+        self.res_layers = nn.ModuleList()
+        for i in range(encoder_n_res_layers):
+            self.res_layers.append(nn.Sequential(nn.Linear(encoder_output_dim, encoder_output_dim),
+                                                 nn.ReLU(inplace=True),
+                                                 nn.Dropout(dropout)))
 
     def forward(self, embedding, input_ids, graph):
         embedding_0d = self.encoder_0d(embedding)
@@ -274,6 +280,8 @@ class LigandEncoder(nn.Module):
         embedding = torch.cat([embedding_0d, embedding_1d, embedding_3d], dim=-1)
         output = self.output_project(embedding)
         output = F.normalize(output, dim=-1)
+        for layer in self.res_layers:
+            output = layer(output)+output
         return output
 
 
