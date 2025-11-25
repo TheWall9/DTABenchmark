@@ -78,12 +78,13 @@ class FusionLigandFeaturizer(FeaturizerBase):
 
 class FusionProteinFeaturizer(FeaturizerBase):
     def __init__(self, struct_root_dir=STRUCT_ROOT_DIR, struct_type='esmfold', pocket_type='dogsite3', pocket_top=3, n_res_expand=10,
-                 edge_num=10, rbf_num=16, pretrained_model_name_or_path="facebook/esm2_t6_8M_UR50D", feat_type='cls'):
+                 pretrained_model_name_or_path="facebook/esm2_t6_8M_UR50D", feat_type='cls'):
         super().__init__()
         self.struct_root_dir = struct_root_dir
         self.struct_type = struct_type
         self.pocket_type = pocket_type
         self.pocket_top = pocket_top
+        self.n_res_expand = n_res_expand
         self.pretrained_model_name_or_path = pretrained_model_name_or_path
         self.feat_type = feat_type
         self.struct_featurizer = LLMStructFeaturizer(struct_root_dir=struct_root_dir, pocket_top=pocket_top,
